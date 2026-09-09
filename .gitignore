@@ -2,3 +2,5 @@ thumbs.db
 .env
 venv/
 __pycache__/
+tests/
+.patch

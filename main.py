@@ -27,7 +27,7 @@ with open("version", "r") as f:
 # ── Konfiguracja ──────────────────────────────────────────────
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8080")
-ANIMESUB_BASE = "http://animesub.info"
+ANIMESUB_BASE = os.environ.get("ANIMESUB_BASE_URL", "http://animesub.info").rstrip("/")
 SEARCH_URL = f"{ANIMESUB_BASE}/szukaj.php"
 DOWNLOAD_URL = f"{ANIMESUB_BASE}/sciagnij.php"
 
@@ -463,117 +463,287 @@ def match_subtitles(
 #  KONWERSJA ASS → SRT
 # ══════════════════════════════════════════════════════════════
 
-def _ass_time_to_srt(t: str) -> str:
-    m = re.match(r"(\d+):(\d{2}):(\d{2})\.(\d{2})", t)
-    if not m:
-        return "00:00:00,000"
-    h, mi, s, cs = m.groups()
-    return f"{int(h):02d}:{mi}:{s},{int(cs)*10:03d}"
+def _ass_time_to_ms(value: str) -> int:
+    """Konwertuje czas ASS/SSA do milisekund."""
+    match = re.fullmatch(r"\s*(\d+):(\d{1,2}):(\d{1,2})\.(\d{1,3})\s*", value)
+    if not match:
+        raise ValueError(f"Nieprawidłowy czas ASS: {value!r}")
+
+    hours, minutes, seconds, fraction = match.groups()
+    minutes_i = int(minutes)
+    seconds_i = int(seconds)
+    if minutes_i > 59 or seconds_i > 59:
+        raise ValueError(f"Nieprawidłowy czas ASS: {value!r}")
+
+    milliseconds = int(fraction.ljust(3, "0")[:3])
+    return (((int(hours) * 60) + minutes_i) * 60 + seconds_i) * 1000 + milliseconds
+
+
+def _ms_to_srt(value: int) -> str:
+    hours, remainder = divmod(value, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
 def _strip_ass_tags(text: str) -> str:
-    result = re.sub(r"\{[^}]*\}", "", text)
-    return result.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ").strip()
+    """
+    Usuwa tagi ASS i fragmenty rysunkowe \\p1...\\p0.
 
-def _deoverlap_srt(srt_text: str) -> str:
-    """Usuwa nakładanie się napisów — przycina end time do start time następnej linii."""
-    blocks = srt_text.strip().split("\n\n")
+    Wcześniej po usunięciu samego tagu {\\p1} komendy wektorowe mogły
+    trafić do SRT jako zwykły tekst.
+    """
+    tag_pattern = re.compile(r"\{([^}]*)\}")
+    drawing_pattern = re.compile(r"\\p(\d+)", re.I)
+
+    output = []
+    cursor = 0
+    drawing_mode = 0
+
+    for match in tag_pattern.finditer(text):
+        if drawing_mode == 0:
+            output.append(text[cursor:match.start()])
+
+        drawing_tags = drawing_pattern.findall(match.group(1))
+        if drawing_tags:
+            drawing_mode = int(drawing_tags[-1])
+
+        cursor = match.end()
+
+    if drawing_mode == 0:
+        output.append(text[cursor:])
+
+    result = "".join(output)
+    result = result.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
+    return "\n".join(line.strip() for line in result.splitlines() if line.strip()).strip()
+
+def _deoverlap_srt(srt_text: str, gap_ms: int = 50) -> str:
+    """
+    Przycina czas końca napisu, jeśli nachodzi na następny.
+
+    ASS obsługuje równoległe warstwy i pozycjonowanie, SRT nie.
+    Po konwersji kilka eventów może więc zostać wyświetlonych
+    w tym samym miejscu. Ta funkcja ogranicza takie nakładanie.
+    """
+
+    # Normalizacja CRLF/LF
+    text = srt_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    blocks = re.split(r"\n\s*\n", text)
     parsed = []
 
-    time_pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})")
+    time_pattern = re.compile(
+        r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*"
+        r"(\d{2}:\d{2}:\d{2},\d{3})"
+    )
+
+    def parse_time(value: str) -> int:
+        h, m, rest = value.split(":")
+        s, ms = rest.split(",")
+        return (
+            int(h) * 3_600_000
+            + int(m) * 60_000
+            + int(s) * 1000
+            + int(ms)
+        )
+
+    def format_time(value: int) -> str:
+        value = max(0, value)
+
+        h, remainder = divmod(value, 3_600_000)
+        m, remainder = divmod(remainder, 60_000)
+        s, ms = divmod(remainder, 1000)
+
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     for block in blocks:
         lines = block.strip().split("\n")
+
         if len(lines) < 3:
             continue
-        m = time_pattern.search(lines[1])
-        if not m:
+
+        match = time_pattern.search(lines[1])
+        if not match:
             continue
+
         parsed.append({
-            "num": lines[0],
-            "start": m.group(1),
-            "end": m.group(2),
-            "text": "\n".join(lines[2:]),
+            "start": parse_time(match.group(1)),
+            "end": parse_time(match.group(2)),
+            "text": "\n".join(lines[2:]).strip(),
         })
 
-    # Przytnij end time jeśli nachodzi na start następnej linii
+    parsed.sort(key=lambda item: (item["start"], item["end"]))
+
     for i in range(len(parsed) - 1):
-        if parsed[i]["end"] > parsed[i + 1]["start"]:
-            # Przytnij do 50ms przed startem następnej, zachowaj minimum 500ms
-            def parse_t(s: str) -> float:
-                h, m, rest = s.split(":")
-                sec, ms = rest.split(",")
-                return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+        current = parsed[i]
+        nxt = parsed[i + 1]
 
-            def fmt_t(t: float) -> str:
-                h_ = int(t // 3600)
-                m_ = int((t % 3600) // 60)
-                s_ = int(t % 60)
-                ms_ = int((t % 1) * 1000)
-                return f"{h_:02d}:{m_:02d}:{s_:02d},{ms_:03d}"
+        if current["end"] <= nxt["start"]:
+            continue
 
-            start_t = parse_t(parsed[i]["start"])
-            next_t = parse_t(parsed[i + 1]["start"])
-            new_end = next_t - 0.05  # 50ms buffer
-            if new_end - start_t < 0.5:
-                new_end = start_t + 0.5  # minimum 500ms wyświetlania
-            parsed[i]["end"] = fmt_t(new_end)
+        # Jeśli następny napis faktycznie zaczyna się później,
+        # kończymy obecny 50 ms wcześniej.
+        if nxt["start"] > current["start"]:
+            current["end"] = max(
+                current["start"] + 1,
+                nxt["start"] - gap_ms,
+            )
 
-    out = []
-    for i, d in enumerate(parsed, 1):
-        out.extend([str(i), f"{d['start']} --> {d['end']}", d["text"], ""])
-    return "\n".join(out)
+    output = []
+
+    for i, item in enumerate(parsed, 1):
+        output.extend([
+            str(i),
+            f"{format_time(item['start'])} --> {format_time(item['end'])}",
+            item["text"],
+            "",
+        ])
+
+    return "\r\n".join(output).rstrip() + "\r\n"
 
 def convert_ass_to_srt(ass_content: str) -> str:
-    """Konwertuje ASS/SSA → SRT."""
-    lines = ass_content.split("\n")
-    dialogues = []
+    """Konwertuje ASS/SSA -> SRT bez zmieniania celowych overlapów."""
+    lines = ass_content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     in_events = False
-    fmt = []
+    format_fields: list[str] = []
+    dialogues = []
+    seen = set()
 
-    for line in lines:
-        t = line.strip()
-        if t.lower() == "[events]":
-            in_events = True; continue
-        if t.startswith("[") and t.lower() != "[events]":
-            in_events = False; continue
+    for raw_line in lines:
+        line = raw_line.strip()
+        lowered = line.lower()
+
+        if lowered == "[events]":
+            in_events = True
+            format_fields = []
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            in_events = False
+            continue
+
         if not in_events:
             continue
-        if t.lower().startswith("format:"):
-            fmt = [f.strip().lower() for f in t[7:].split(",")]
-            continue
-        if not t.lower().startswith("dialogue:"):
+
+        if lowered.startswith("format:"):
+            format_fields = [field.strip().lower() for field in line[7:].split(",")]
             continue
 
-        dstr = t[9:].strip()
-        parts, cur, fc = [], "", 0
-        for ch in dstr:
-            if ch == "," and fc < len(fmt) - 1:
-                parts.append(cur.strip()); cur = ""; fc += 1
-            else:
-                cur += ch
-        parts.append(cur.strip())
+        if not lowered.startswith("dialogue:") or not format_fields:
+            continue
 
+        # maxsplit zachowuje przecinki znajdujące się w polu Text.
+        values = line[9:].lstrip().split(",", len(format_fields) - 1)
+        if len(values) != len(format_fields):
+            continue
+
+        event = dict(zip(format_fields, values))
         try:
-            si, ei, ti = fmt.index("start"), fmt.index("end"), fmt.index("text")
-        except ValueError:
-            continue
-        if len(parts) <= max(si, ei, ti):
+            start_ms = _ass_time_to_ms(event["start"])
+            end_ms = _ass_time_to_ms(event["end"])
+        except (KeyError, ValueError):
             continue
 
-        text = _strip_ass_tags(parts[ti])
-        if text:
-            dialogues.append({
-                "start": _ass_time_to_srt(parts[si]),
-                "end": _ass_time_to_srt(parts[ei]),
-                "text": text,
-            })
+        if end_ms <= start_ms:
+            continue
 
-    dialogues.sort(key=lambda d: d["start"])
-    out = []
-    for i, d in enumerate(dialogues, 1):
-        out.extend([str(i), f"{d['start']} --> {d['end']}", d["text"], ""])
-    return "\n".join(out)
+        plain_text = _strip_ass_tags(event.get("text", ""))
+        if not plain_text:
+            continue
+
+        # Warstwy ASS często duplikują ten sam tekst dla cienia/obrysu.
+        key = (start_ms, end_ms, plain_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        dialogues.append(key)
+
+    if not dialogues:
+        raise ValueError("ASS nie zawiera dialogów możliwych do konwersji")
+
+    dialogues.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    output = []
+    for index, (start_ms, end_ms, plain_text) in enumerate(dialogues, 1):
+        output.extend([
+            str(index),
+            f"{_ms_to_srt(start_ms)} --> {_ms_to_srt(end_ms)}",
+            plain_text,
+            "",
+        ])
+
+    return "\r\n".join(output).rstrip() + "\r\n"
+
+
+def _decode_subtitle_bytes(content: bytes) -> str:
+    """Dekoduje najczęstsze kodowania napisów z AnimeSub."""
+    for encoding in ("utf-8-sig", "windows-1250", "iso-8859-2"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+    raise ValueError("Nie udało się rozpoznać kodowania napisów")
+
+
+def _looks_like_html(text: str) -> bool:
+    sample = text.lstrip("\ufeff \t\r\n").lower()[:1500]
+    return (
+        sample.startswith("<!doctype html")
+        or sample.startswith("<html")
+        or "<html" in sample
+        or "<body" in sample
+    )
+
+
+SRT_TIMING_RE = re.compile(
+    r"(?m)^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s+-->\s+"
+    r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*$"
+)
+
+
+def _detect_subtitle_format(text: str, extension: Optional[str] = None) -> Optional[str]:
+    """Wykrywa format po zawartości; rozszerzenie jest tylko fallbackiem."""
+    sample = text.lstrip("\ufeff \t\r\n")
+
+    if (
+        re.search(r"(?mi)^\s*\[events\]\s*$", sample)
+        and re.search(r"(?mi)^\s*dialogue\s*:", sample)
+    ):
+        return "ass"
+
+    if SRT_TIMING_RE.search(sample):
+        return "srt"
+
+    if sample.startswith("WEBVTT"):
+        return "vtt"
+
+    if re.search(r"(?m)^\{\d+\}\{\d+\}", sample):
+        return "microdvd"
+
+    if re.search(r"(?m)^\d{1,2}:\d{2}:\d{2}[:|]", sample):
+        return "tmplayer"
+
+    ext = (extension or "").lower().lstrip(".")
+    return {
+        "ass": "ass",
+        "ssa": "ass",
+        "srt": "srt",
+        "sub": "microdvd",
+    }.get(ext)
+
+
+def _normalize_srt(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return normalized.replace("\n", "\r\n") + "\r\n"
+
+
+def _is_valid_srt(text: str) -> bool:
+    if _looks_like_html(text):
+        return False
+    if re.search(r"(?mi)^\s*\[events\]\s*$", text):
+        return False
+    return bool(SRT_TIMING_RE.search(text))
+
 
 def convert_microdvd_to_srt(content: str, fps: float = 23.976) -> str:
     """Konwertuje napisy MicroDVD ({start}{stop}tekst) do SRT."""
@@ -684,39 +854,63 @@ async def download_subtitle(id: str, hash: str, query: str = "test", type: str =
     """Proxy do pobierania napisów z animesub.info."""
     log.info(f"[Download] id={id}, query={query}")
 
+    def find_hash(html: str) -> Optional[str]:
+        soup = BeautifulSoup(html, "html.parser")
+        for form in soup.find_all("form"):
+            method = (form.get("method") or "").lower()
+            action = (form.get("action") or "").split("?", 1)[0].rstrip("/")
+            if method != "post" or not action.endswith("sciagnij.php"):
+                continue
+
+            form_id = form.find("input", attrs={"name": "id"})
+            if not form_id or form_id.get("value") != str(id):
+                continue
+
+            sh = form.find("input", attrs={"name": "sh"})
+            if sh and sh.get("value"):
+                return sh.get("value")
+        return None
+
     try:
         async with httpx.AsyncClient(
-            timeout=15, follow_redirects=True, cookies=httpx.Cookies()
+            timeout=15,
+            follow_redirects=True,
+            cookies=httpx.Cookies(),
         ) as client:
-
-            # Krok 1: Wyszukiwanie → ciasteczka + świeży hash
+            # Krok 1: ta sama sesja musi pobrać stronę i świeży hash.
             search_params = {"szukane": query, "pTitle": type, "pSortuj": sort}
             if page > 0:
                 search_params["od"] = page
             search_full_url = f"{SEARCH_URL}?{urlencode(search_params)}"
 
-            log.info("[Download] Krok 1: Pobieram stronę wyszukiwania (ciasteczka)")
+            log.info("[Download] Krok 1: Pobieram stronę wyszukiwania")
             search_resp = await client.get(search_full_url, headers=COMMON_HEADERS)
+            if search_resp.status_code != 200:
+                log.error(f"[Download] Search HTTP {search_resp.status_code}")
+                return PlainTextResponse("AnimeSub search failed", status_code=502)
+
             search_html = search_resp.content.decode("iso-8859-2", errors="replace")
+            fresh_hash = find_hash(search_html)
 
-            # Szukamy świeżego hasha dla naszego ID
-            soup = BeautifulSoup(search_html, "html.parser")
-            fresh_hash = None
-
-            for form in soup.find_all("form", attrs={"method": "POST", "action": "sciagnij.php"}):
-                form_id = form.find("input", attrs={"name": "id"})
-                if form_id and form_id.get("value") == str(id):
-                    sh = form.find("input", attrs={"name": "sh"})
-                    if sh:
-                        fresh_hash = sh.get("value")
-                        log.info(f"[Download] ✓ Świeży hash dla id={id}")
-                        break
+            # Gdy wynik z listy nie zawiera już ID, spróbuj bezpośredniej strony wpisu.
+            if not fresh_hash:
+                direct_url = f"{SEARCH_URL}?ID={id}"
+                log.info(f"[Download] Hash nie znaleziony na liście, próbuję {direct_url}")
+                direct_resp = await client.get(direct_url, headers=COMMON_HEADERS)
+                if direct_resp.status_code == 200:
+                    direct_html = direct_resp.content.decode("iso-8859-2", errors="replace")
+                    fresh_hash = find_hash(direct_html)
+                    if fresh_hash:
+                        search_full_url = str(direct_resp.url)
 
             if not fresh_hash:
-                log.warning("[Download] ✗ Brak świeżego hasha, używam oryginalnego")
-                fresh_hash = hash
+                log.error(f"[Download] Brak świeżego hasha dla id={id}")
+                return PlainTextResponse("Fresh AnimeSub hash not found", status_code=502)
 
-            # Krok 2: Pobieranie napisów
+            log.info(f"[Download] ✓ Świeży hash dla id={id}")
+
+            # Krok 2: POST musi iść od razu po HTTPS. Przy HTTP -> HTTPS
+            # redirect 301/302 POST może zostać zamieniony na GET.
             log.info("[Download] Krok 2: Pobieram napisy")
             dl_resp = await client.post(
                 DOWNLOAD_URL,
@@ -729,98 +923,116 @@ async def download_subtitle(id: str, hash: str, query: str = "test", type: str =
                 },
             )
 
-            content = dl_resp.content
-            log.info(f"[Download] Pobrano {len(content)} bajtów")
+            if dl_resp.status_code != 200:
+                log.error(
+                    f"[Download] Download HTTP {dl_resp.status_code}; final_url={dl_resp.url}"
+                )
+                return PlainTextResponse("AnimeSub download failed", status_code=502)
 
-            # Sprawdź błąd zabezpieczeń
+            content = dl_resp.content
+            content_type = dl_resp.headers.get("content-type", "")
+            log.info(
+                f"[Download] Pobrano {len(content)} bajtów; "
+                f"content-type={content_type}; final_url={dl_resp.url}"
+            )
+
+            if not content:
+                return PlainTextResponse("AnimeSub returned empty data", status_code=502)
+
             raw = content.decode("latin-1", errors="ignore")
             if "zabezpiecze" in raw or "Błąd" in raw or "B³±d" in raw:
                 log.error("[Download] ✗ BŁĄD ZABEZPIECZEŃ")
                 return PlainTextResponse("Security error", status_code=502)
 
-            subtitle_ext = ".srt"
+            subtitle_ext: Optional[str] = None
 
-            # Rozpakuj ZIP
-            if content[:2] == b"PK":
+            if zipfile.is_zipfile(io.BytesIO(content)):
                 log.info("[Download] Rozpakowuję ZIP...")
                 try:
                     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                        all_files = zf.namelist()
-                        log.info(f"[Download] Pliki w ZIP: {all_files}")
-                        sub_name = next(
-                            (n for n in all_files if re.search(r"\.(srt|ass|ssa|sub|txt)$", n, re.I)),
-                            None
+                        all_files = [name for name in zf.namelist() if not name.endswith("/")]
+                        subtitle_files = [
+                            name for name in all_files
+                            if re.search(r"\.(srt|ass|ssa|sub|txt)$", name, re.I)
+                        ]
+                        log.info(f"[Download] Pliki napisów w ZIP: {subtitle_files}")
+
+                        if not subtitle_files:
+                            return PlainTextResponse("No supported subtitle in ZIP", status_code=502)
+
+                        priority = {".srt": 0, ".ass": 1, ".ssa": 1, ".sub": 2, ".txt": 3}
+                        sub_name = min(
+                            subtitle_files,
+                            key=lambda name: priority.get(
+                                "." + name.rsplit(".", 1)[-1].lower(), 99
+                            ),
                         )
-                        if not sub_name and all_files:
-                            # Jeśli brak rozpoznanego rozszerzenia, weź pierwszy plik
-                            sub_name = all_files[0]
-                            log.info(f"[Download] Brak rozpoznanego rozszerzenia, biorę: {sub_name}")
-                        if sub_name:
-                            content = zf.read(sub_name)
-                            subtitle_ext = "." + sub_name.rsplit(".", 1)[-1].lower() if "." in sub_name else ".srt"
-                            log.info(f"[Download] Rozpakowano: {sub_name}")
-                        else:
-                            return PlainTextResponse("No subtitle in ZIP", status_code=404)
+                        content = zf.read(sub_name)
+                        subtitle_ext = "." + sub_name.rsplit(".", 1)[-1].lower()
+                        log.info(f"[Download] Rozpakowano: {sub_name}")
                 except zipfile.BadZipFile:
                     return PlainTextResponse("Bad ZIP", status_code=502)
 
-            # Kodowanie → UTF-8
-            text = None
             try:
-                text = content.decode("utf-8")
-                if "\ufffd" in text:
-                    raise ValueError()
-            except (UnicodeDecodeError, ValueError):
-                try:
-                    text = content.decode("windows-1250")
-                except UnicodeDecodeError:
-                    text = content.decode("iso-8859-2", errors="replace")
+                text = _decode_subtitle_bytes(content)
+            except ValueError as exc:
+                log.error(f"[Download] {exc}")
+                return PlainTextResponse("Unsupported subtitle encoding", status_code=502)
 
-            # TXT → SRT (auto-detekcja formatu: MicroDVD, TMPlayer)
-            if subtitle_ext in (".txt", ".sub"):
-                log.info("[Download] Wykrywam format TXT...")
-                try:
-                    srt = None
-                    if re.search(r"^\{\d+\}\{\d+\}", text, re.M):
-                        log.info("[Download] Format: MicroDVD")
-                        srt = convert_microdvd_to_srt(text)
-                    elif re.search(r"^\d{1,2}:\d{2}:\d{2}[:\|]", text, re.M):
-                        log.info("[Download] Format: TMPlayer")
-                        srt = convert_tmplayer_to_srt(text)
-                    if srt and len(srt) > 10:
-                        text = srt
-                        subtitle_ext = ".srt"
-                        log.info("[Download] ✓ Konwersja OK")
-                    else:
-                        log.warning("[Download] Nierozpoznany format TXT")
-                except Exception as e:
-                    log.error(f"[Download] Błąd konwersji: {e}")
+            # Najważniejsza ochrona: nigdy nie wysyłaj strony PHP/HTML jako SRT.
+            if _looks_like_html(text):
+                log.error(
+                    f"[Download] AnimeSub zwrócił HTML zamiast napisów; final_url={dl_resp.url}"
+                )
+                return PlainTextResponse("AnimeSub returned HTML instead of subtitles", status_code=502)
 
-            # ASS/SSA → SRT
-            if subtitle_ext in (".ass", ".ssa"):
-                log.info("[Download] Konwertuję ASS → SRT...")
-                try:
-                    srt = convert_ass_to_srt(text)
-                    if srt and len(srt) > 10:
-                        text = srt
-                        log.info("[Download] ✓ Konwersja OK")
-                except Exception as e:
-                    log.error(f"[Download] Błąd konwersji: {e}")
-            if "-->" in text:
+            subtitle_format = _detect_subtitle_format(text, subtitle_ext)
+            log.info(f"[Download] Wykryty format: {subtitle_format}; ext={subtitle_ext}")
+
+            try:
+                if subtitle_format == "ass":
+                    text = convert_ass_to_srt(text)
+                elif subtitle_format == "microdvd":
+                    text = convert_microdvd_to_srt(text)
+                elif subtitle_format == "tmplayer":
+                    text = convert_tmplayer_to_srt(text)
+                elif subtitle_format == "srt":
+                    text = _normalize_srt(text)
+                elif subtitle_format == "vtt":
+                    return PlainTextResponse("WebVTT is not supported yet", status_code=415)
+                else:
+                    return PlainTextResponse("Unsupported subtitle format", status_code=415)
+            except Exception as exc:
+                log.error(
+                    f"[Download] Błąd konwersji {subtitle_format} -> SRT: {exc}",
+                    exc_info=True,
+                )
+                return PlainTextResponse("Subtitle conversion failed", status_code=502)
+
+            if subtitle_format in ("ass", "microdvd", "tmplayer"):
                 text = _deoverlap_srt(text)
-            log.info(f"[Download] ✓ Wysyłam ({len(text)} znaków)")
+
+            # _deoverlap_srt nie jest uruchamiany. Overlapy w ASS są często celowe.
+            if not _is_valid_srt(text):
+                log.error("[Download] Wynik konwersji nie jest poprawnym SRT")
+                return PlainTextResponse("Invalid SRT after conversion", status_code=502)
+
+            log.info(
+                f"[Download] ✓ Wysyłam SRT ({len(text)} znaków, źródło={subtitle_format})"
+            )
             return Response(
                 content=text.encode("utf-8"),
                 media_type="text/srt; charset=utf-8",
                 headers={
                     "Access-Control-Allow-Origin": "*",
-                    "Content-Disposition": 'attachment; filename="subtitle.srt"',
+                    "Content-Disposition": 'inline; filename="subtitle.srt"',
+                    "X-Subtitle-Source-Format": subtitle_format or "unknown",
                 },
             )
 
     except Exception as e:
-        log.error(f"[Download] Błąd: {e}")
-        return PlainTextResponse(f"Download failed: {e}", status_code=500)
+        log.error(f"[Download] Błąd: {e}", exc_info=True)
+        return PlainTextResponse("Download failed", status_code=500)
 
 
 # ══════════════════════════════════════════════════════════════
