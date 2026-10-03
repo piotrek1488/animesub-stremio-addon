@@ -404,6 +404,25 @@ def _title_matches(sub_titles: list[str], target_title: str) -> bool:
             continue
         sub_norm = _normalize_title(raw_title)
         sub_words = set(sub_norm.split())
+
+        # Odrzuć openingi / endingi typu Ending3, Opening2, OP05, ED12
+        if re.search(
+            r"\b(?:opening|ending|op|ed)\s*\d+\b",
+            sub_norm,
+            re.I,
+        ):
+            log.debug(f"[Filter] Odrzucam OP/ED: {raw_title}")
+            return False
+
+        # Odrzuć filmy
+        if re.search(r"\b(?:gekijouban|movie|film)\b", sub_norm, re.I):
+            log.debug(f"[Filter] Odrzucam film: {raw_title}")
+            return False
+
+        if sub_words & non_episode_markers:
+            log.debug(f"[Filter] Odrzucam (marker): {raw_title}")
+            return False
+
         if sub_words & non_episode_markers:
             log.debug(f"[Filter] Odrzucam (marker): {raw_title}")
             return False
@@ -446,9 +465,10 @@ def match_subtitles(
         if not _title_matches(sub_titles, target_title):
             continue
 
-        # Filtr odcinka
-        if target_episode is not None and s["episode"] is not None and s["episode"] != target_episode:
-            continue
+        # Filtr odcinka — dla konkretnego odcinka wymagamy dokładnego dopasowania
+        if target_episode is not None:
+            if s["episode"] != target_episode:
+                continue
 
         # Filtr sezonu
         if target_season is not None and s["season"] is not None:

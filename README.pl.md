@@ -16,6 +16,12 @@ Przepisany na Python z [addonu JS](https://huggingface.co/spaces/anemicpathbling
 4. Filtruje wyniki — odrzuca inne serie (np. Boruto gdy szukamy Naruto), openingi, endingi i spin-offy
 5. Gdy użytkownik wybierze napisy, addon pobiera ZIP dwuetapowo (sesja + świeży hash), rozpakowuje, konwertuje ASS→SRT i serwuje plik
 
+## Ważne informacje dla użytkowników
+
+**Po aktualizacji addonu** — jeśli zmieniła się wersja aplikacji i coś przestało działać, usuń addon ze Stremio lub Nuvio i dodaj go ponownie za pomocą adresu manifestu. Pozwoli to odświeżyć konfigurację zainstalowanego addonu i uniknąć korzystania przez klienta ze starych danych poprzedniej wersji.
+
+**Synchronizacja napisów** — addon znajduje napisy pasujące do anime i numeru odcinka, ale mogą one być przygotowane dla innego wydania wideo, na przykład TV, Blu-ray, WEB-DL lub innego release'u grupy fansubowej. Jeśli napisy wyświetlają się za wcześnie albo za późno, przesuń je ręcznie za pomocą ustawienia opóźnienia napisów w Stremio lub Nuvio.
+
 ## Struktura projektu
 
 ```

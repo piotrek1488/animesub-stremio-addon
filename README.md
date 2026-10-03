@@ -16,6 +16,12 @@ Rewritten in Python from a [JS addon](https://huggingface.co/spaces/anemicpathbl
 4. It filters results — removes other series (e.g. Boruto when searching for Naruto), openings, endings, and spin-offs
 5. When the user selects subtitles, the addon downloads a ZIP in two steps (session + fresh hash), extracts it, converts ASS → SRT, and serves the file
 
+## Important notes for users
+
+**After an addon update** — if the application version has changed and something no longer works, remove the addon from Stremio or Nuvio and add it again using the manifest URL. This refreshes the installed addon configuration and prevents the client from continuing to use stale data from the previous version.
+
+**Subtitle timing** — the addon finds subtitles that match the anime and episode, but the timing may have been prepared for a different video release (for example TV, Blu-ray, WEB-DL, or another fansub release). If the subtitles are ahead of or behind the video, adjust the subtitle delay manually in Stremio or Nuvio.
+
 ## Project structure
 
 ```
