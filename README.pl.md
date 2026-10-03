@@ -48,7 +48,7 @@ Uruchomienie kontenera:
 docker run -d \
   --name animesub-stremio-addon \
   -p 8080:8080 \
-  -e BASE_URL=http://localhost:8080 \
+  -e AS_BASE_URL=http://localhost:8080 \
   docker.io/ludvickpro/animesub-stremio-addon:latest
 ```
 
@@ -112,20 +112,20 @@ Po rejestracji w Oracle od razu przejdź na Pay As You Go (Billing → Upgrade).
 ## Deploy alternatywny
 
 ### Koyeb (darmowy, nie usypia)
-Deploy z GitHuba, darmowy plan obejmuje jedną usługę. Ustaw zmienną `BASE_URL` na URL deploymentu.
+Deploy z GitHuba, darmowy plan obejmuje jedną usługę. Ustaw zmienną `AS_BASE_URL` na URL deploymentu.
 
 ### Hugging Face Spaces (darmowy, usypia)
-Działa, ale usypia po czasie bezczynności. Można obejść pingując UptimeRobotem. Addon auto-wykrywa zmienne `SPACE_HOST`/`SPACE_ID`.
+Działa, ale usypia po czasie bezczynności. Można obejść pingując UptimeRobotem. Addon auto-wykrywa zmienne `AS_SPACE_HOST`/`AS_SPACE_ID`.
 
 ### Render
-Plik `render.yaml` jest gotowy. Darmowy plan usypia po 15 min. Ustaw zmienną `BASE_URL`.
+Plik `render.yaml` jest gotowy. Darmowy plan usypia po 15 min. Ustaw zmienną `AS_BASE_URL`.
 
 ## Zmienne środowiskowe
 
 | Zmienna    | Wymagana | Opis |
 |------------|----------|------|
-| `BASE_URL` | Tak*     | Pełny URL deploymentu (z https://). Auto-wykrywany na HF Spaces i lokalnie. |
-| `PORT`     | Nie      | Port serwera (domyślnie 8080) |
+| `AS_BASE_URL` | Tak*     | Pełny URL deploymentu (z https://). Auto-wykrywany na HF Spaces i lokalnie. |
+| `AS_PORT`     | Nie      | Port serwera (domyślnie 8080) |
 
 ## Przydatne komendy (Oracle Cloud)
 

@@ -26,7 +26,7 @@ with open("version", "r") as f:
 
 # ── Konfiguracja ──────────────────────────────────────────────
 
-BASE_URL = os.environ.get("BASE_URL", "http://localhost:8080")
+BASE_URL = os.environ.get("AS_BASE_URL", "http://localhost:8080")
 ANIMESUB_BASE = os.environ.get("ANIMESUB_BASE_URL", "http://animesub.info").rstrip("/")
 SEARCH_URL = f"{ANIMESUB_BASE}/szukaj.php"
 DOWNLOAD_URL = f"{ANIMESUB_BASE}/sciagnij.php"
@@ -1119,11 +1119,11 @@ async def subtitles_handler(content_type: str, content_id: str):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("AS_PORT", 8080))
 
-    if not os.environ.get("BASE_URL"):
-        sh = os.environ.get("SPACE_HOST")
-        si = os.environ.get("SPACE_ID")
+    if not os.environ.get("AS_BASE_URL"):
+        sh = os.environ.get("AS_SPACE_HOST")
+        si = os.environ.get("AS_SPACE_ID")
         if sh:
             BASE_URL = f"https://{sh}"
         elif si:
