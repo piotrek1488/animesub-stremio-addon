@@ -16,6 +16,12 @@ Rewritten in Python from a [JS addon](https://huggingface.co/spaces/anemicpathbl
 4. It filters results — removes other series (e.g. Boruto when searching for Naruto), openings, endings, and spin-offs
 5. When the user selects subtitles, the addon downloads a ZIP in two steps (session + fresh hash), extracts it, converts ASS → SRT, and serves the file
 
+## Important notes for users
+
+**After an addon update** — if the application version has changed and something no longer works, remove the addon from Stremio or Nuvio and add it again using the manifest URL. This refreshes the installed addon configuration and prevents the client from continuing to use stale data from the previous version.
+
+**Subtitle timing** — the addon finds subtitles that match the anime and episode, but the timing may have been prepared for a different video release (for example TV, Blu-ray, WEB-DL, or another fansub release). If the subtitles are ahead of or behind the video, adjust the subtitle delay manually in Stremio or Nuvio.
+
 ## Project structure
 
 ```
@@ -48,7 +54,7 @@ Run the container:
 docker run -d \
   --name animesub-stremio-addon \
   -p 8080:8080 \
-  -e BASE_URL=http://localhost:8080 \
+  -e AS_BASE_URL=http://localhost:8080 \
   docker.io/ludvickpro/animesub-stremio-addon:latest
 ```
 
@@ -112,20 +118,20 @@ After registering with Oracle, switch to Pay As You Go (Billing → Upgrade). Yo
 ## Alternative deployment
 
 ### Koyeb (free, no sleeping)
-Deploy from GitHub. The free plan includes one service. Set the `BASE_URL` variable to your deployment URL.
+Deploy from GitHub. The free plan includes one service. Set the `AS_BASE_URL` variable to your deployment URL.
 
 ### Hugging Face Spaces (free, sleeps)
-Works, but goes to sleep after inactivity. This can be bypassed by pinging it with UptimeRobot. The addon auto-detects `SPACE_HOST`/`SPACE_ID` variables.
+Works, but goes to sleep after inactivity. This can be bypassed by pinging it with UptimeRobot. The addon auto-detects `AS_SPACE_HOST`/`AS_SPACE_ID` variables.
 
 ### Render
-The `render.yaml` file is ready. The free plan sleeps after 15 minutes. Set the `BASE_URL` variable.
+The `render.yaml` file is ready. The free plan sleeps after 15 minutes. Set the `AS_BASE_URL` variable.
 
 ## Environment variables
 
 | Variable   | Required | Description |
 |------------|----------|-------------|
-| `BASE_URL` | Yes*     | Full deployment URL (with https://). Auto-detected on HF Spaces and locally |
-| `PORT`     | No       | Server port (default: 8080) |
+| `AS_BASE_URL` | Yes*     | Full deployment URL (with https://). Auto-detected on HF Spaces and locally |
+| `AS_PORT`     | No       | Server port (default: 8080) |
 
 ## Useful commands (Oracle Cloud)
 
